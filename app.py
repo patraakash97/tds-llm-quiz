@@ -1,4 +1,3 @@
-# app.py
 import os
 from datetime import datetime, timedelta
 
@@ -7,7 +6,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from solver import solve_quiz_chain
-
 
 # -------------------------------
 # 1. Request Model
@@ -30,61 +28,59 @@ app = FastAPI()
 
 
 # -------------------------------
-# 3. Health check
+# 3. Root (Optional)
 # -------------------------------
 
 @app.get("/")
-def root():
-    return {"status": "alive"}
+def home():
+    return {
+        "message": "TDS LLM Quiz Solver API Running",
+        "endpoint": "/quiz",
+        "version": "1.0"
+    }
 
 
 # -------------------------------
-# 4. Quiz Endpoint (SYNC)
+# 4. /quiz Endpoint
 # -------------------------------
 
 @app.post("/quiz")
 def quiz_endpoint(payload: QuizPayload):
     """
-    Main endpoint that IITM will call.
+    IITM will POST:
+    {
+        "email": "...",
+        "secret": "...",
+        "url": "quiz-start-url"
+    }
     """
 
-    email = payload.email
-    secret = payload.secret
-    url = payload.url
-
-    # Secret check – this is the ONLY place that can return non-200/ok
-    if secret != APP_SECRET:
-        # 403 is required by spec for wrong secret
+    # Verify secret
+    if payload.secret != APP_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
-    # Deadline (3 minutes) – as per assignment
+    # Prepare processing window (3 minutes)
     start_time = datetime.utcnow()
     deadline = start_time + timedelta(minutes=3)
 
-    # Call solver; never let exceptions bubble out as top-level status="error"
     try:
-        solver_result = solve_quiz_chain(
-            email=email,
-            secret=secret,
-            first_url=url,
-            deadline=deadline,
+        final_result = solve_quiz_chain(
+            email=payload.email,
+            secret=payload.secret,
+            first_url=payload.url,
+            deadline=deadline
         )
-        final_result = {
-            "status": "solver-ok",
-            "result": solver_result,
-        }
     except Exception as e:
-        # Even if solver explodes, we still return HTTP 200 and status="ok" at top
-        final_result = {
-            "status": "solver-exception",
-            "error": str(e),
-        }
+        # Catch ANY crash → prevent 500 errors
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "solver-exception",
+                "error": str(e)
+            }
+        )
 
-    # ALWAYS status="ok" at top level if secret is valid
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "ok",
-            "final_result": final_result,
-        },
-    )
+    return {
+        "status": "ok",
+        "final_result": final_result
+    }

@@ -2,9 +2,9 @@ fastapi
 uvicorn[standard]
 requests
 pydantic
-playwright
 pandas
 numpy
 pdfplumber
 matplotlib
 scikit-learn
+typing-extensions

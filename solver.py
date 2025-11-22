@@ -33,7 +33,7 @@ def origin_from_url(url: str) -> Optional[str]:
 def extract_question_and_submit_url(text: str, html: str, current_url: str):
     """
     Extract a question snippet and the /submit URL from page text/HTML.
-    Works for demo page and similar formats.
+    Works for the demo page and similar formats.
     """
     submit_url = None
 
@@ -76,7 +76,7 @@ def extract_first_pdf_link(text: str, html: str):
 
 def extract_embedded_base64_blocks(html: str) -> str:
     """
-    demo-scrape page has base64-encoded instructions inside JS template string.
+    demo-scrape page has base64-encoded instructions inside a JS template string.
     Decode those and return as extra text.
     """
     chunks = []
@@ -92,13 +92,13 @@ def extract_embedded_base64_blocks(html: str) -> str:
 
 
 # ============================================================
-# 2. Built-in solvers
+# 2. Built-in solvers (PDF/CSV/JSON/etc.)
 # ============================================================
 
 def solve_pdf_sum_value_page2(pdf_bytes: bytes) -> float:
     """
     Example PDF helper: sum of ALL numeric cells on page 2.
-    (Kept for future tasks.)
+    (Kept for possible PDF-type quiz.)
     """
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         if len(pdf.pages) < 2:
@@ -382,23 +382,31 @@ def solve_quiz_chain(email: str, secret: str, first_url: str, deadline: datetime
         # --- Solve this page ---
         answer = solve_single_quiz(question, text, html, current_url, email)
 
-        # Normalize answer: GA3 expects primitive (str / int / float), not dict/list
+        # 1) Normalize answer type to primitive
         if not isinstance(answer, (str, int, float)):
             answer = str(answer)
 
+        # 2) Build payload and FORCE everything to be primitive
+        payload = {
+            "email": str(email),
+            "secret": str(secret),
+            "url": str(current_url),
+            "answer": answer,
+        }
+
+        # Extra safety: if anything is still dict/list, convert to JSON string
+        for k, v in list(payload.items()):
+            if isinstance(v, (dict, list)):
+                payload[k] = json.dumps(v)
+
         print(f"[DEBUG] Posting answer to: {submit_url}")
-        print(f"[DEBUG] Payload answer: {answer!r}")
+        print(f"[DEBUG] Payload: {payload!r}")
 
         # --- POST answer to /submit ---
         try:
             submit_resp = requests.post(
                 submit_url,
-                json={
-                    "email": email,
-                    "secret": secret,
-                    "url": current_url,
-                    "answer": answer,
-                },
+                json=payload,
                 timeout=30,
             )
         except Exception as e:

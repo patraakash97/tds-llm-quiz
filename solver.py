@@ -74,12 +74,32 @@ def extract_first_pdf_link(text: str, html: str):
     return None
 
 
+def extract_embedded_base64_blocks(html: str) -> str:
+    """
+    Some pages (like demo-scrape) contain base64-encoded HTML instructions
+    inside a JS backtick string. Decode those and return as extra text.
+    """
+    chunks = []
+    # Look for things like: code = `U2NyYXBlIDxhIGhyZWY9Ii9kZW1v...`
+    for m in re.finditer(r"`([A-Za-z0-9+/=\s]{40,})`", html):
+        b64 = "".join(m.group(1).split())
+        try:
+            decoded = base64.b64decode(b64).decode("utf-8", errors="ignore")
+            chunks.append(decoded)
+        except Exception:
+            continue
+    return "\n".join(chunks)
+
+
 # ============================================================
 # 2. Built-in solvers
 # ============================================================
 
 def solve_pdf_sum_value_page2(pdf_bytes: bytes) -> float:
-    """Demo: sum of 'Value' column on page 2 of a PDF."""
+    """
+    Example PDF helper: sum of ALL numeric cells on page 2.
+    (Not used by demo chain currently, but kept for future tasks.)
+    """
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         if len(pdf.pages) < 2:
             raise ValueError("PDF has less than 2 pages, cannot use page 2")
@@ -88,10 +108,11 @@ def solve_pdf_sum_value_page2(pdf_bytes: bytes) -> float:
         if not table:
             raise ValueError("No table found on PDF page 2")
 
-        df = pd.DataFrame(table[1:], columns=table[0])
-        col = next(c for c in df.columns if c.lower() == "value")
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-        return float(df[col].sum())
+        df = pd.DataFrame(table)
+        flat = df.values.ravel()
+        nums = pd.to_numeric(flat, errors="coerce")
+        total = float(np.nansum(nums))
+        return total
 
 
 def solve_csv_basic(url: str, task: str):
@@ -135,7 +156,7 @@ def solve_csv_basic(url: str, task: str):
 
 
 def solve_json_basic(url: str, task: str):
-    """Basic JSON tasks like count or max field."""
+    """Basic JSON tasks like count or max(field)."""
     try:
         data = requests.get(url, timeout=20).json()
     except Exception as e:
@@ -163,7 +184,7 @@ def solve_json_basic(url: str, task: str):
 def parse_html_table(html: str):
     """
     Parse first HTML table from raw HTML using pandas.read_html.
-    If this gives issues on Render, you can return None here.
+    If this gives issues on some pages, we just return None.
     """
     try:
         tables = pd.read_html(html)
@@ -192,7 +213,7 @@ def generate_plot_base64(df, x, y) -> str:
 # 3. Per-page quiz solver (pure requests, no browser)
 # ============================================================
 
-def solve_single_quiz(question: str, text: str, html: str, current_url: str):
+def solve_single_quiz(question: str, text: str, html: str, current_url: str, email: str):
     """
     Decide how to answer one quiz page, based on question + content.
     """
@@ -206,34 +227,46 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str):
     if "anything you want" in text_lower:
         return "hello-from-akash"
 
-    # -------- DEMO TYPE 2: RELATIVE SCRAPE /demo-scrape-data --------
-    if "scrape" in q_lower and "demo-scrape-data" in q_lower:
-        m = re.search(r"Scrape\s+(\S+)", question, re.I)
-        if m:
-            relative = m.group(1)
-            origin = origin_from_url(current_url)
-            if origin:
-                url = origin + relative
-            else:
-                url = relative
-            print(f"[DEBUG] Scraping relative URL: {url}")
-            try:
-                data = requests.get(url, timeout=20).json()
-            except Exception as e:
-                return {"status": "json-error", "error": f"Failed scrape JSON: {e}"}
-            # Try to extract some "secret" string
-            if isinstance(data, dict):
-                for v in data.values():
-                    if isinstance(v, str):
-                        return v
-            if isinstance(data, list) and data and isinstance(data[0], dict):
-                for v in data[0].values():
-                    if isinstance(v, str):
-                        return v
-            return data
+    # --------------------------------------------------
+    # DEMO SCRAPE QUESTION (even when hidden in base64 JS)
+    # --------------------------------------------------
+    # Try to find /demo-scrape-data?email=... either directly
+    # in HTML/text or inside the decoded base64 block.
+    relative = None
 
-    # -------- PDF question: sum Value on page 2 --------
-    if "sum" in q_lower and "value" in q_lower and "page 2" in q_lower:
+    # Direct search
+    m = re.search(r"(/demo-scrape-data[^\"'<\s]*)", text)
+    if not m:
+        # Look in decoded base64 instructions
+        decoded_extra = extract_embedded_base64_blocks(html)
+        m = re.search(r"(/demo-scrape-data[^\"'<\s]*)", decoded_extra)
+
+    if m:
+        relative = m.group(1).rstrip('">) ')
+        # Replace $EMAIL placeholder if present
+        relative = relative.replace("$EMAIL", email)
+        origin = origin_from_url(current_url)
+        url = origin + relative if origin else relative
+        print(f"[DEBUG] Scraping relative URL (auto): {url}")
+
+        try:
+            data = requests.get(url, timeout=20).json()
+        except Exception as e:
+            return {"status": "json-error", "error": f"Failed scrape JSON: {e}"}
+
+        # Heuristic: pick first string value as "secret code"
+        if isinstance(data, dict):
+            for v in data.values():
+                if isinstance(v, str):
+                    return v
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            for v in data[0].values():
+                if isinstance(v, str):
+                    return v
+        return data
+
+    # -------- PDF QUESTION (generic) --------
+    if "pdf" in q_lower and "page 2" in q_lower and "sum" in q_lower:
         pdf_url = extract_first_pdf_link(text, html)
         if not pdf_url:
             return {"status": "pdf-error", "error": "Could not find PDF URL"}
@@ -244,7 +277,7 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str):
         except Exception as e:
             return {"status": "pdf-error", "error": str(e)}
 
-    # -------- CSV questions --------
+    # -------- CSV QUESTIONS --------
     if "csv" in q_lower:
         m = re.search(r"(https?://\S+\.csv)", text)
         if m:
@@ -252,7 +285,7 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str):
             print(f"[DEBUG] Downloading CSV from: {csv_url}")
             return solve_csv_basic(csv_url, q_lower)
 
-    # -------- JSON questions --------
+    # -------- JSON QUESTIONS --------
     if "json" in q_lower:
         m = re.search(r"(https?://\S+\.json)", text)
         if m:
@@ -260,7 +293,7 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str):
             print(f"[DEBUG] Downloading JSON from: {json_url}")
             return solve_json_basic(json_url, q_lower)
 
-    # -------- HTML table parsing --------
+    # -------- HTML TABLE PARSING --------
     if "table" in q_lower or "html table" in q_lower:
         df = parse_html_table(html)
         if df is not None:
@@ -287,7 +320,7 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str):
             except Exception as e:
                 return {"status": "linreg-error", "error": str(e)}
 
-    # -------- Default fallback --------
+    # -------- DEFAULT FALLBACK --------
     print("[WARN] No specific solver matched; returning 'Not-Implemented'")
     return "Not-Implemented"
 
@@ -343,7 +376,7 @@ def solve_quiz_chain(email: str, secret: str, first_url: str, deadline: datetime
             break
 
         # --- Solve this page ---
-        answer = solve_single_quiz(question, text, html, current_url)
+        answer = solve_single_quiz(question, text, html, current_url, email)
 
         print(f"[DEBUG] Posting answer to: {submit_url}")
         print(f"[DEBUG] Payload answer: {answer!r}")

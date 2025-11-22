@@ -14,7 +14,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.linear_model import LinearRegression
-from sklearn.cluster import KMeans  # unused now, but kept for extension
+from sklearn.cluster import KMeans  # unused, kept for possible extension
 
 
 # ============================================================
@@ -76,8 +76,8 @@ def extract_first_pdf_link(text: str, html: str):
 
 def extract_embedded_base64_blocks(html: str) -> str:
     """
-    Some pages (like demo-scrape) contain base64-encoded HTML instructions
-    inside a JS backtick string. Decode those and return as extra text.
+    demo-scrape page has base64-encoded instructions inside JS template string.
+    Decode those and return as extra text.
     """
     chunks = []
     # Look for things like: code = `U2NyYXBlIDxhIGhyZWY9Ii9kZW1v...`
@@ -98,7 +98,7 @@ def extract_embedded_base64_blocks(html: str) -> str:
 def solve_pdf_sum_value_page2(pdf_bytes: bytes) -> float:
     """
     Example PDF helper: sum of ALL numeric cells on page 2.
-    (Not used by demo chain currently, but kept for future tasks.)
+    (Kept for future tasks.)
     """
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         if len(pdf.pages) < 2:
@@ -228,54 +228,56 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str, ema
         return "hello-from-akash"
 
     # --------------------------------------------------
-    # DEMO SCRAPE QUESTION (even when hidden in base64 JS)
+    # DEMO SCRAPE QUESTION (handles base64 JS + /demo-scrape-data)
     # --------------------------------------------------
-    # Try to find /demo-scrape-data?email=... either directly
-    # in HTML/text or inside the decoded base64 block.
-    relative = None
 
-    # Direct search
-    m = re.search(r"(/demo-scrape-data[^\"'<\s]*)", text)
-    if not m:
-        # Look in decoded base64 instructions
-        decoded_extra = extract_embedded_base64_blocks(html)
-        m = re.search(r"(/demo-scrape-data[^\"'<\s]*)", decoded_extra)
+    # Decode any embedded base64 instructions from JS
+    decoded_extra = extract_embedded_base64_blocks(html)
+    combined = text + "\n" + decoded_extra
 
+    # Find /demo-scrape-data?email=... pattern
+    m = re.search(r"(/demo-scrape-data[^\"'<\s]*)", combined)
     if m:
         relative = m.group(1).rstrip('">) ')
-        # Replace $EMAIL placeholder if present
+        # replace $EMAIL if present
         relative = relative.replace("$EMAIL", email)
         origin = origin_from_url(current_url)
         url = origin + relative if origin else relative
         print(f"[DEBUG] Scraping relative URL (auto): {url}")
 
         try:
-            data = requests.get(url, timeout=20).json()
+            resp = requests.get(url, timeout=20)
+            # demo-scrape-data returns plain text secret
+            secret = resp.text.strip()
+            if not secret:
+                # fallback: try JSON and pick first string field
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        for v in data.values():
+                            if isinstance(v, str):
+                                secret = v
+                                break
+                    if not secret:
+                        secret = json.dumps(data)[:200]
+                except Exception:
+                    secret = "scrape-empty"
+            return secret
         except Exception as e:
-            return {"status": "json-error", "error": f"Failed scrape JSON: {e}"}
-
-        # Heuristic: pick first string value as "secret code"
-        if isinstance(data, dict):
-            for v in data.values():
-                if isinstance(v, str):
-                    return v
-        if isinstance(data, list) and data and isinstance(data[0], dict):
-            for v in data[0].values():
-                if isinstance(v, str):
-                    return v
-        return data
+            # must return string, not dict
+            return f"scrape-error:{e}"
 
     # -------- PDF QUESTION (generic) --------
     if "pdf" in q_lower and "page 2" in q_lower and "sum" in q_lower:
         pdf_url = extract_first_pdf_link(text, html)
         if not pdf_url:
-            return {"status": "pdf-error", "error": "Could not find PDF URL"}
+            return "pdf-error:no-url"
         print(f"[DEBUG] Downloading PDF from: {pdf_url}")
         try:
             pdf_bytes = requests.get(pdf_url, timeout=30).content
             return solve_pdf_sum_value_page2(pdf_bytes)
         except Exception as e:
-            return {"status": "pdf-error", "error": str(e)}
+            return f"pdf-error:{e}"
 
     # -------- CSV QUESTIONS --------
     if "csv" in q_lower:
@@ -283,7 +285,8 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str, ema
         if m:
             csv_url = m.group(1)
             print(f"[DEBUG] Downloading CSV from: {csv_url}")
-            return solve_csv_basic(csv_url, q_lower)
+            ans = solve_csv_basic(csv_url, q_lower)
+            return ans
 
     # -------- JSON QUESTIONS --------
     if "json" in q_lower:
@@ -291,7 +294,8 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str, ema
         if m:
             json_url = m.group(1)
             print(f"[DEBUG] Downloading JSON from: {json_url}")
-            return solve_json_basic(json_url, q_lower)
+            ans = solve_json_basic(json_url, q_lower)
+            return ans
 
     # -------- HTML TABLE PARSING --------
     if "table" in q_lower or "html table" in q_lower:
@@ -318,7 +322,7 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str, ema
                 pred = model.predict([[X[-1][0] + 1]])
                 return float(pred[0])
             except Exception as e:
-                return {"status": "linreg-error", "error": str(e)}
+                return f"linreg-error:{e}"
 
     # -------- DEFAULT FALLBACK --------
     print("[WARN] No specific solver matched; returning 'Not-Implemented'")
@@ -326,7 +330,7 @@ def solve_single_quiz(question: str, text: str, html: str, current_url: str, ema
 
 
 # ============================================================
-# 4. Quiz chain logic – requests only, safe JSON
+# 4. Quiz chain logic – requests only, safe JSON, primitive answers
 # ============================================================
 
 def solve_quiz_chain(email: str, secret: str, first_url: str, deadline: datetime):
@@ -377,6 +381,10 @@ def solve_quiz_chain(email: str, secret: str, first_url: str, deadline: datetime
 
         # --- Solve this page ---
         answer = solve_single_quiz(question, text, html, current_url, email)
+
+        # Normalize answer: GA3 expects primitive (str / int / float), not dict/list
+        if not isinstance(answer, (str, int, float)):
+            answer = str(answer)
 
         print(f"[DEBUG] Posting answer to: {submit_url}")
         print(f"[DEBUG] Payload answer: {answer!r}")
